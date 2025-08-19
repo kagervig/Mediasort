@@ -57,35 +57,6 @@
 #PROCESSING VIDEO FILES#
 ############
 
-: <<'END_COMMENT'
-# Remove trailing 'x' if present (needed for parsing)
-    DIMENSIONS="${RAW_DIMENSIONS%x}"
-    WIDTH=${DIMENSIONS%x*}
-    HEIGHT=${DIMENSIONS#*x}
-
-    if ! [[ "$WIDTH" =~ ^[0-9]+$ && "$HEIGHT" =~ ^[0-9]+$ ]]; then
-        echo "Skipping $BASENAME: invalid dimensions ($RAW_DIMENSIONS)"
-        continue
-    fi
-
-
-# Get raw dimensions    
-RAW_DIMENSIONS=$(ffprobe -v error -select_streams v:0 \
-    -show_entries stream=width,height \
-    -of csv=s=x:p=0 "$FILE" 2>/dev/null)
-
-if [[ -z "$RAW_DIMENSIONS" ]]; then
-    echo "Skipping $BASENAME: ffprobe returned no dimensions"
-    continue
-fi
-#Check for Live Photo resolution FIRST
-    if [[ "$WIDTH" == "1440" || "$HEIGHT" == "1440" ]]; then
-        mv "$FILE" "$LIVE_PHOTOS/"
-        echo "Moved $BASENAME to Live Photos/"
-        continue
-    fi
-
-END_COMMENT
 
 # Function to extract rotation from Display Matrix side data
 get_rotation() {
