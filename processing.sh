@@ -232,9 +232,14 @@ for FILE in "$FOLDER_PATH"/*; do
     fi
 done
 
+#WAHT DOES THIS CODE DO??
 for FILE in "$FOLDER_PATH"/*; do
     [[ -f "$FILE" ]] || continue
     # Get raw dimensions
+
+    #TO DO - make this a constant (string that doesn't change) at the top of the file
+    #this FFMPEG command extracts raw dimensions of file
+    #TO DO - add all other FFMPEG commands as constants
     RAW_DIMENSIONS=$(ffprobe -v error -select_streams v:0 \
         -show_entries stream=width,height \
         -of csv=s=x:p=0 "$FILE" 2>/dev/null)
@@ -263,7 +268,7 @@ for FILE in "$FOLDER_PATH"/*; do
         WIDTH=$TEMP
         echo "[Post Swap] Height = $HEIGHT | Width = $WIDTH"
     fi
-    # Standard orientation detection
+    # Standard orientation detection - TO DO make this a function
     if (( WIDTH > HEIGHT )); then
         mv "$FILE" "$HORIZONTAL/"
         echo "Moved $BASENAME to horizontal/"
@@ -276,6 +281,15 @@ for FILE in "$FOLDER_PATH"/*; do
 
 done   
 
+#find and delete empty folders (Y to confirm)
+
+
+#check file names in photos/raw against photos/jpg. 
+#IF any missing in raw (IE HDR photos) COPY over to raw
+
+
+
+#TO DO move this into a function - verify final media count
 #count total files again
 second_count=$(find "$FOLDER_PATH" -type f | wc -l)
 echo "$count files found"
@@ -285,17 +299,6 @@ elif (( second_count == count )); then
     echo "file count matches initial count"
 fi
 
+#TO DO create report of what was changed, rather than printing everything in the terminal
+#TO DO create error log
 
-
-#delete empty folders
-
-#Move IMG_E*** files to PHOTOS/Ephotos
-#move SRT, AAE, LRF to DELETE
-#move photos to /raw & /jpeg
-
-
-#check file names in photos/raw against photos/jpg. 
-#IF any missing in raw (IE HDR photos) COPY over to raw
-
-#count total files again
-#IF total_files_initial is not equal to total_files_after highlight delta as an error message
