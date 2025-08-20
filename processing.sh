@@ -45,20 +45,9 @@
 
 
 
-############
-#FOR EACH MOVE OPERATION#
-############
-#count files to move
-#move files
-#count #of moved files
-#if delta, throw error
-
-############
-#PROCESSING VIDEO FILES#
-############
 
 
-# Function to extract rotation from Display Matrix side data
+#extract rotation from Display Matrix side data
 get_rotation() {
     local file="$1"
     ffprobe -v error -select_streams v:0 \
@@ -71,12 +60,15 @@ get_rotation() {
         | select(.side_data_type == "Display Matrix") 
         | .rotation // empty
     '
-    
+    #return type is integer (typically a multiple of 90), may be negative
     #-count_frames 0 \
 }
 
-#this function uses an FFMPEG command to extract raw dimensions of file
-GET_RAW_DIMENSIONS() {
+#uses an FFMPEG command to extract raw dimensions of file
+#Takes a file path as an argument
+#returns bash exit code of 0 or 1
+#string in the format WIDTHxHEIGHT (e.g. 1920x1080)
+get_raw_dimensions() {
     local file="$1"
     local dims
     dims=$(ffprobe -v error -select_streams v:0 \
@@ -87,10 +79,89 @@ GET_RAW_DIMENSIONS() {
         echo "Error: ffprobe returned no dimensions for $file" >&2
         return 1
     fi
-
     echo "$dims"
 }
 
+#takes width and height as arguments
+#determines which folder to move the file to based on orientation
+move_file_by_orientation(){
+    local width="$1"
+    local height="$2"
+    if (( width > height )); then
+        mv "$FILE" "$HORIZONTAL/"
+    elif (( height > width )); then
+        mv "$FILE" "$VERTICAL/"
+    fi
+}
+
+#find and delete empty folders (Y to confirm)
+delete_empty_folders() {
+    local FOLDER_PATH="$1"
+    for dir in "$FOLDER_PATH"/*/; do
+        #check if it is a directory
+        [[ -d "$dir" ]] || continue
+        #count files inside the directory
+        file_count=$(find "$dir" -type f | wc -l)
+        #if no files, ask to delete the directory
+        if (( file_count == 0 )); then
+            echo "no files found in $dir, do you want to delete it? (Y/n)"
+            read -r confirm
+            if [[ "$confirm" =~ ^[Yy]$ ]]; then
+                echo "Deleting empty directory: $dir"
+                rm -rf "$dir"
+            fi
+        fi
+    done
+}
+
+#check file names in photos/raw against photos/jpg. 
+#IF any missing in raw (IE HDR photos) COPY over to raw
+#declare empty array to hold raw file names
+copy_non_raw_photos (){
+    local RAW_PHOTOS="$1"
+    raw_files=()
+    for files in "$RAW_PHOTOS"/*; do
+        #build list of raw file names (not extensions)
+        BASENAME=$(basename "$files")
+        raw_files+=("${BASENAME%.*}")
+    done
+
+   for file in "$PHOTOS"/*; do
+        #extract jpg filename without extension
+        BASENAME=$(basename "$file")
+        #check if file is a jpg
+        image_ext="${file##*.}"
+        echo "$BASENAME has extension $image_ext"
+
+        #ignores any non JPG files
+        if [[ "$image_ext" == "JPG" ]]; then
+            jpg_no_extension="${BASENAME%.*}"
+            echo "Checking if $jpg_no_extension is in raw files array"
+            #check if the file name is in the raw_files array
+            if [[ ! " ${raw_files[@]} " =~ " $jpg_no_extension " ]]; then
+                cp "$file" "$RAW_PHOTOS/"
+                echo "Copied $file to $RAW_PHOTOS/"
+            fi
+        fi
+    done
+    echo "Copied all non-raw photos!"
+}
+
+#count total files again (check nothing was deleted)
+validate_file_count() {
+    local FOLDER_PATH="$1"
+    second_count=$(find "$FOLDER_PATH" -type f | wc -l)
+    echo "$count files found"  >&2 
+    if (( second_count != count )); then
+        echo "file counts do not match"  >&2 
+    elif (( second_count == count )); then
+        echo "file count matches initial count"  >&2 
+    fi
+}
+
+#################
+#EXECUTION BEGINS
+#################
 
 #get folder to process
 FOLDER_PATH="$1"
@@ -107,8 +178,6 @@ fi
 #count total files initial
 count=$(find "$FOLDER_PATH" -type f | wc -l)
 echo "$count files total"
-
-
 
 #create output folders
     #DELETE
@@ -129,10 +198,6 @@ LIVE_PHOTOS="$FOLDER_PATH/Live Photos"
 EPHOTOS="$FOLDER_PATH/E Photos"
 VIDEOS="$FOLDER_PATH/VIDEOS"
 
-
-# Create folders
-mkdir -p "$VIDEOS" "$HORIZONTAL" "$VERTICAL" "$PHOTOS" "$RAW_PHOTOS" "$DELETE" "$LIVE_PHOTOS" "$EPHOTOS"
-
 #define file extensions
     #MP4
     #SRT, AAE, LRF - all together in DELETE
@@ -141,11 +206,14 @@ mkdir -p "$VIDEOS" "$HORIZONTAL" "$VERTICAL" "$PHOTOS" "$RAW_PHOTOS" "$DELETE" "
     #JPG, HEIC, JPEG, PNG - JPG
 
 # File extensions
-photo_exts="heic jpg jpeg png"
-raw_exts="cr3 dng"
-iphone_video_exts="mov"
-other_video_exts="mp4"
-metadata_exts="srt aae lrf"
+PHOTO_EXTS="heic jpg jpeg png"
+RAW_EXTS="cr3 dng"
+IPHONE_VIDEO_EXTS="mov"
+OTHER_VIDEO_EXTS="mp4"
+METADATA_EXTS="srt aae lrf"
+
+# Create folders
+mkdir -p "$VIDEOS" "$HORIZONTAL" "$VERTICAL" "$PHOTOS" "$RAW_PHOTOS" "$DELETE" "$LIVE_PHOTOS" "$EPHOTOS"
 
 #Move IMG_E*** files to PHOTOS/Ephotos
 #move SRT, AAE, LRF to DELETE
@@ -169,48 +237,50 @@ for FILE in "$FOLDER_PATH"/*; do
     fi
 
     # Move photo files
-    if [[ " $photo_exts " =~ " $EXT_LOWER " ]]; then
+    if [[ " $PHOTO_EXTS " =~ " $EXT_LOWER " ]]; then
         mv "$FILE" "$PHOTOS/"
         echo "Moved $BASENAME to PHOTOS"
         continue
     fi
 
     # Move camera/drone files
-    if [[ " $other_video_exts " =~ " $EXT_LOWER " ]]; then
+    if [[ " $OTHER_VIDEO_EXTS " =~ " $EXT_LOWER " ]]; then
         mv "$FILE" "$VIDEOS/"
         echo "Moved $BASENAME to VIDEOS"
         continue
     fi
 
     #move raw photo files
-    if [[ " $raw_exts " =~ " $EXT_LOWER " ]]; then
+    if [[ " $RAW_EXTS " =~ " $EXT_LOWER " ]]; then
         mv "$FILE" "$RAW_PHOTOS/"
         echo "Moved $BASENAME to RAW PHOTOS"    
         continue
     fi
 
     # Move metadata files
-    if [[ " $metadata_exts " =~ " $EXT_LOWER " ]]; then
+    if [[ " $METADATA_EXTS " =~ " $EXT_LOWER " ]]; then
         mv "$FILE" "$DELETE/"
         echo "Moved $BASENAME to DELETE/"
         continue
     fi
 
     # Skip non-video files
-    if [[ ! " $iphone_video_exts " =~ " $EXT_LOWER " ]]; then
+    if [[ ! " $IPHONE_VIDEO_EXTS " =~ " $EXT_LOWER " ]]; then
         echo "Skipping $BASENAME: not a supported video file"
         continue
     fi
 
 
     #move iphone videos
-    if [[ " $iphone_video_exts " =~ " $EXT_LOWER " ]]; then
-        # Get raw dimensions
-        if ! RAW_DIMENSIONS=$(GET_RAW_DIMENSIONS "$FILE"); then
-            echo "Skipping $BASENAME"
+    if [[ " $IPHONE_VIDEO_EXTS " =~ " $EXT_LOWER " ]]; then
+        #gets raw dimensions of file
+        RAW_DIMENSIONS=$(get_raw_dimensions "$FILE")
+        status=$?
+        #if function fails, or returns empty, skip the file
+        if [[ $status -ne 0 || -z "$RAW_DIMENSIONS" ]]; then
+            echo "Skipping $BASENAME (status=$status, dims='$RAW_DIMENSIONS')"
             continue
         fi
-
 
         # Removes trailing 'x' if present (needed for parsing)
         DIMENSIONS="${RAW_DIMENSIONS%x}"
@@ -222,7 +292,7 @@ for FILE in "$FOLDER_PATH"/*; do
             continue
         fi
 
-        # Check for Live Photo resolution FIRST
+        # check if live photo based on dimensions
         if [[ "$WIDTH" == "1440" || "$HEIGHT" == "1440" ]]; then
             mv "$FILE" "$LIVE_PHOTOS/"
             echo "Moved $BASENAME to Live Photos/"
@@ -233,29 +303,28 @@ for FILE in "$FOLDER_PATH"/*; do
             continue
         fi
         # Standard orientation detection
-        if (( WIDTH > HEIGHT )); then
-            mv "$FILE" "$HORIZONTAL/"
-            echo "Moved $BASENAME to horizontal/"
-        elif (( HEIGHT > WIDTH )); then
-            mv "$FILE" "$VERTICAL/"
-            echo "Moved $BASENAME to vertical/"
-        else
-            echo "$BASENAME is square, skipping."
-        fi
+        move_file_by_orientation "$WIDTH" "$HEIGHT"
 
         continue
     fi
 done
+echo " "
 
-#This uses ffprobe to check real dimensions and rotation flag of a video
-#in order to determine whether it is horizontal or vertical
+
+
+#By this point, only files with "x" at the end of the dimensions remain
+#this usses FFMPEG to get rotation flag
+#if rotation flag is set, dimensions are swapped
 #it is kept separate and performed last as it is slower than every other operation
 for FILE in "$FOLDER_PATH"/*; do
     [[ -f "$FILE" ]] || continue
 
-    # Gets raw dimensions using ffmpeg command
-    if ! RAW_DIMENSIONS=$(GET_RAW_DIMENSIONS "$FILE"); then
-        echo "Skipping $BASENAME"
+   #gets raw dimensions of file
+    RAW_DIMENSIONS=$(get_raw_dimensions "$FILE")
+    status=$?
+    #if function fails, or returns empty, skip the file
+    if [[ $status -ne 0 || -z "$RAW_DIMENSIONS" ]]; then
+        echo "Skipping $BASENAME (status=$status, dims='$RAW_DIMENSIONS')"
         continue
     fi
 
@@ -276,86 +345,27 @@ for FILE in "$FOLDER_PATH"/*; do
         echo "[Post Swap] Height = $HEIGHT | Width = $WIDTH"
     fi
     # Standard orientation detection - TO DO make this a function
-    if (( WIDTH > HEIGHT )); then
-        mv "$FILE" "$HORIZONTAL/"
-        echo "Moved $BASENAME to horizontal/"
-    elif (( HEIGHT > WIDTH )); then
-        mv "$FILE" "$VERTICAL/"
-        echo "Moved $BASENAME to vertical/"
-    else
-        echo "$BASENAME is square, skipping."
-    fi
+    move_file_by_orientation "$WIDTH" "$HEIGHT"
 
 done   
 
-#find and delete empty folders (Y to confirm)
-for dir in "$FOLDER_PATH"/*/; do
-    #check if it is a directory
-    [[ -d "$dir" ]] || continue
-    #count files inside the directory
-    file_count=$(find "$dir" -type f | wc -l)
-    #if no files, ask to delete the directory
-    if (( file_count == 0 )); then
-        echo "no files found in $dir, do you want to delete it? (Y/n)"
-        read -r confirm
-        if [[ "$confirm" =~ ^[Yy]$ ]]; then
-            echo "Deleting empty directory: $dir"
-            rm -rf "$dir"
-        elif [[ "$confirm" =~ ^[Nn]$ ]]; then
-            echo "Skipping deletion of $dir"
-        else
-            echo "Invalid input, skipping deletion of $dir"
-        fi
-    else
-        echo "Directory $dir is not empty, skipping."
-    fi
-done
 
-#check file names in photos/raw against photos/jpg. 
-#IF any missing in raw (IE HDR photos) COPY over to raw
-echo "Checking for missing RAW files in $RAW_PHOTOS against JPG files in $PHOTOS"
-#declare empty array to hold raw file names
-raw_files=()
-for files in "$RAW_PHOTOS"/*; do
-    #build list of raw file names (not extensions)
-    BASENAME=$(basename "$files")
-    raw_files+=("${BASENAME%.*}")
-    echo "Raw file: $BASENAME"
-done
+delete_empty_folders $FOLDER_PATH
+
+non_raw_photos_status=$(copy_non_raw_photos $RAW_PHOTOS)
+echo "$non_raw_photos_status"
+
+file_count_output=$(validate_file_count $FOLDER_PATH)
+echo "$file_count_output"
 
 
-#i have a list of raw file names, now I need to check against jpg files
-#to do this i need to loop through jpg files and check if the name is in the raw_files array
-#i'll need to get the basename of each jpg file and check if it is in the raw_files array
-for file in "$PHOTOS"/*; do
-    #extract jpg filename without extension
-    BASENAME=$(basename "$file")
-    #check if file is a jpg
-    image_ext="${file##*.}"
-    echo "$BASENAME has extension $image_ext"
 
-    if [[ "$image_ext" == "JPG" ]]; then
-        jpg_no_extension="${BASENAME%.*}"
-        echo "Checking if $jpg_no_extension is in raw files array"
-        #check if the file name is in the raw_files array
-        if [[ ! " ${raw_files[@]} " =~ " $jpg_no_extension " ]]; then
-            cp "$file" "$RAW_PHOTOS/"
-            echo "Copied $file to $RAW_PHOTOS/"
-        fi
-    fi
-done
+
 
 #TO DO mute drone and camera videos
 
 #TO DO move this into a function - verify final media count
-#count total files again
-second_count=$(find "$FOLDER_PATH" -type f | wc -l)
-echo "$count files found"
-if (( second_count != count )); then
-    echo "file counts do not match"
-elif (( second_count == count )); then
-    echo "file count matches initial count"
-fi
+
 
 #TO DO create report of what was changed, rather than printing everything in the terminal
 #TO DO create error log
