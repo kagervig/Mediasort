@@ -75,6 +75,23 @@ get_rotation() {
     #-count_frames 0 \
 }
 
+#this function uses an FFMPEG command to extract raw dimensions of file
+GET_RAW_DIMENSIONS() {
+    local file="$1"
+    local dims
+    dims=$(ffprobe -v error -select_streams v:0 \
+        -show_entries stream=width,height \
+        -of csv=s=x:p=0 "$file" 2>/dev/null)
+
+    if [[ -z "$dims" ]]; then
+        echo "Error: ffprobe returned no dimensions for $file" >&2
+        return 1
+    fi
+
+    echo "$dims"
+}
+
+
 #get folder to process
 FOLDER_PATH="$1"
 
@@ -105,9 +122,8 @@ echo "$count files total"
 # Folders to sort into
 HORIZONTAL="$FOLDER_PATH/HORIZONTAL"
 VERTICAL="$FOLDER_PATH/VERTICAL"
+RAW_PHOTOS="$FOLDER_PATH/RAW PHOTOS"
 PHOTOS="$FOLDER_PATH/PHOTOS"
-RAW="$FOLDER_PATH/PHOTOS/RAW"
-JPG="$FOLDER_PATH/PHOTOS/JPG"
 DELETE="$FOLDER_PATH/DELETE"
 LIVE_PHOTOS="$FOLDER_PATH/Live Photos"
 EPHOTOS="$FOLDER_PATH/E Photos"
@@ -115,7 +131,7 @@ VIDEOS="$FOLDER_PATH/VIDEOS"
 
 
 # Create folders
-mkdir -p "$VIDEOS" "$HORIZONTAL" "$VERTICAL" "$PHOTOS" "$RAW" "$JPG" "$DELETE" "$LIVE_PHOTOS" "$EPHOTOS"
+mkdir -p "$VIDEOS" "$HORIZONTAL" "$VERTICAL" "$PHOTOS" "$RAW_PHOTOS" "$DELETE" "$LIVE_PHOTOS" "$EPHOTOS"
 
 #define file extensions
     #MP4
@@ -138,9 +154,11 @@ metadata_exts="srt aae lrf"
 for FILE in "$FOLDER_PATH"/*; do
     [[ -f "$FILE" ]] || continue
 
-    #basename strips the path, leaving just the filename.
+    #basename gives the file name + extension
     BASENAME=$(basename "$FILE")
+    #extracts the extension from the file name
     EXT="${FILE##*.}"
+    #makes the extension lowercase
     EXT_LOWER=$(echo "$EXT" | tr '[:upper:]' '[:lower:]')
 
     # Move IMG_E*** files to E photos
@@ -152,8 +170,8 @@ for FILE in "$FOLDER_PATH"/*; do
 
     # Move photo files
     if [[ " $photo_exts " =~ " $EXT_LOWER " ]]; then
-        mv "$FILE" "$JPG/"
-        echo "Moved $BASENAME to PHOTOS/JPG"
+        mv "$FILE" "$PHOTOS/"
+        echo "Moved $BASENAME to PHOTOS"
         continue
     fi
 
@@ -166,8 +184,8 @@ for FILE in "$FOLDER_PATH"/*; do
 
     #move raw photo files
     if [[ " $raw_exts " =~ " $EXT_LOWER " ]]; then
-        mv "$FILE" "$RAW/"
-        echo "Moved $BASENAME to PHOTOS/RAW"    
+        mv "$FILE" "$RAW_PHOTOS/"
+        echo "Moved $BASENAME to RAW PHOTOS"    
         continue
     fi
 
@@ -188,16 +206,13 @@ for FILE in "$FOLDER_PATH"/*; do
     #move iphone videos
     if [[ " $iphone_video_exts " =~ " $EXT_LOWER " ]]; then
         # Get raw dimensions
-        RAW_DIMENSIONS=$(ffprobe -v error -select_streams v:0 \
-            -show_entries stream=width,height \
-            -of csv=s=x:p=0 "$FILE" 2>/dev/null)
-
-        if [[ -z "$RAW_DIMENSIONS" ]]; then
-            echo "Skipping $BASENAME: ffprobe returned no dimensions"
+        if ! RAW_DIMENSIONS=$(GET_RAW_DIMENSIONS "$FILE"); then
+            echo "Skipping $BASENAME"
             continue
         fi
 
-        # Remove trailing 'x' if present (needed for parsing)
+
+        # Removes trailing 'x' if present (needed for parsing)
         DIMENSIONS="${RAW_DIMENSIONS%x}"
         WIDTH=${DIMENSIONS%x*}
         HEIGHT=${DIMENSIONS#*x}
@@ -232,20 +247,15 @@ for FILE in "$FOLDER_PATH"/*; do
     fi
 done
 
-#WAHT DOES THIS CODE DO??
+#This uses ffprobe to check real dimensions and rotation flag of a video
+#in order to determine whether it is horizontal or vertical
+#it is kept separate and performed last as it is slower than every other operation
 for FILE in "$FOLDER_PATH"/*; do
     [[ -f "$FILE" ]] || continue
-    # Get raw dimensions
 
-    #TO DO - make this a constant (string that doesn't change) at the top of the file
-    #this FFMPEG command extracts raw dimensions of file
-    #TO DO - add all other FFMPEG commands as constants
-    RAW_DIMENSIONS=$(ffprobe -v error -select_streams v:0 \
-        -show_entries stream=width,height \
-        -of csv=s=x:p=0 "$FILE" 2>/dev/null)
-
-    if [[ -z "$RAW_DIMENSIONS" ]]; then
-        echo "Skipping $BASENAME: ffprobe returned no dimensions"
+    # Gets raw dimensions using ffmpeg command
+    if ! RAW_DIMENSIONS=$(GET_RAW_DIMENSIONS "$FILE"); then
+        echo "Skipping $BASENAME"
         continue
     fi
 
@@ -254,15 +264,12 @@ for FILE in "$FOLDER_PATH"/*; do
     WIDTH=${DIMENSIONS%x*}
     HEIGHT=${DIMENSIONS#*x}
 
-    #2nd pass processing
     TEMP="0"
     # Use Display Matrix rotation (if available)
     ROTATION=$(get_rotation "$FILE")
     echo "Rotation for $BASENAME: $ROTATION"
     echo "[PRE SWAP] Height = $HEIGHT | Width = $WIDTH"
     if [[ "$ROTATION" == "90" || "$ROTATION" == "-90" || "$ROTATION" == "270" || "$ROTATION" == "-270" ]]; then
-        #mv "$FILE" "$VERTICAL/"
-        #echo "Moved $BASENAME to vertical/ (rotation: $ROTATION)"
         TEMP=$HEIGHT
         HEIGHT=$WIDTH
         WIDTH=$TEMP
@@ -282,12 +289,63 @@ for FILE in "$FOLDER_PATH"/*; do
 done   
 
 #find and delete empty folders (Y to confirm)
-
+for dir in "$FOLDER_PATH"/*/; do
+    #check if it is a directory
+    [[ -d "$dir" ]] || continue
+    #count files inside the directory
+    file_count=$(find "$dir" -type f | wc -l)
+    #if no files, ask to delete the directory
+    if (( file_count == 0 )); then
+        echo "no files found in $dir, do you want to delete it? (Y/n)"
+        read -r confirm
+        if [[ "$confirm" =~ ^[Yy]$ ]]; then
+            echo "Deleting empty directory: $dir"
+            rm -rf "$dir"
+        elif [[ "$confirm" =~ ^[Nn]$ ]]; then
+            echo "Skipping deletion of $dir"
+        else
+            echo "Invalid input, skipping deletion of $dir"
+        fi
+    else
+        echo "Directory $dir is not empty, skipping."
+    fi
+done
 
 #check file names in photos/raw against photos/jpg. 
 #IF any missing in raw (IE HDR photos) COPY over to raw
+echo "Checking for missing RAW files in $RAW_PHOTOS against JPG files in $PHOTOS"
+#declare empty array to hold raw file names
+raw_files=()
+for files in "$RAW_PHOTOS"/*; do
+    #build list of raw file names (not extensions)
+    BASENAME=$(basename "$files")
+    raw_files+=("${BASENAME%.*}")
+    echo "Raw file: $BASENAME"
+done
 
 
+#i have a list of raw file names, now I need to check against jpg files
+#to do this i need to loop through jpg files and check if the name is in the raw_files array
+#i'll need to get the basename of each jpg file and check if it is in the raw_files array
+for file in "$PHOTOS"/*; do
+    #extract jpg filename without extension
+    BASENAME=$(basename "$file")
+    #check if file is a jpg
+    image_ext="${file##*.}"
+    echo "$BASENAME has extension $image_ext"
+
+    if [[ "$image_ext" == "JPG" ]]; then
+        jpg_no_extension="${BASENAME%.*}"
+        echo "Checking if $jpg_no_extension is in raw files array"
+        #check if the file name is in the raw_files array
+        if [[ ! " ${raw_files[@]} " =~ " $jpg_no_extension " ]]; then
+            cp "$file" "$RAW_PHOTOS/"
+            echo "Copied $file to $RAW_PHOTOS/"
+        fi
+    fi
+done
+
+#TO DO mute drone and camera videos
 
 #TO DO move this into a function - verify final media count
 #count total files again
