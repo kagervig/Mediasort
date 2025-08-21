@@ -119,11 +119,11 @@ delete_empty_folders() {
 #declare empty array to hold raw file names
 copy_non_raw_photos (){
     local RAW_PHOTOS="$1"
-    raw_files=()
+    raw_files_list=()
     for files in "$RAW_PHOTOS"/*; do
         #build list of raw file names (not extensions)
         BASENAME=$(basename "$files")
-        raw_files+=("${BASENAME%.*}")
+        raw_files_list+=("${BASENAME%.*}")
     done
 
    for file in "$PHOTOS"/*; do
@@ -138,9 +138,9 @@ copy_non_raw_photos (){
             jpg_no_extension="${BASENAME%.*}"
             echo "Checking if $jpg_no_extension is in raw files array"
             #check if the file name is in the raw_files array
-            if [[ ! " ${raw_files[@]} " =~ " $jpg_no_extension " ]]; then
+            if [[ ! " ${raw_files_list[@]} " =~ " $jpg_no_extension " ]]; then
                 cp "$file" "$RAW_PHOTOS/"
-                echo "Copied $file to $RAW_PHOTOS/"
+                echo "Copied $jpg_no_extension to $RAW_PHOTOS/"
             fi
         fi
     done
@@ -158,6 +158,143 @@ validate_file_count() {
         echo "file count matches initial count"  >&2 
     fi
 }
+
+#Move IMG_E*** files to PHOTOS/Ephotos
+#move SRT, AAE, LRF files to DELETE
+#separate raw and jpg photos respectively
+sort_media_files() {
+    local FOLDER_PATH="$1"
+    for FILE in "$FOLDER_PATH"/*; do
+        [[ -f "$FILE" ]] || continue
+
+        #basename gives the file name + extension
+        BASENAME=$(basename "$FILE")
+        #extracts the extension from the file name
+        EXT="${FILE##*.}"
+        #makes the extension lowercase
+        EXT_LOWER=$(echo "$EXT" | tr '[:upper:]' '[:lower:]')
+
+        # Move IMG_E*** files to E photos
+        if [[ "$BASENAME" == IMG_E* ]]; then
+            mv "$FILE" "$EPHOTOS/"
+            echo "Moved $BASENAME to E photos/"
+            continue
+        fi
+
+        # Move photo files (jpg, heic, png)
+        if [[ " $PHOTO_EXTS " =~ " $EXT_LOWER " ]]; then
+            mv "$FILE" "$PHOTOS/"
+            echo "Moved $BASENAME to PHOTOS"
+            continue
+        fi
+
+        # Move camera/drone files
+        if [[ " $OTHER_VIDEO_EXTS " =~ " $EXT_LOWER " ]]; then
+            mv "$FILE" "$VIDEOS/"
+            echo "Moved $BASENAME to VIDEOS"
+            continue
+        fi
+
+        #move raw photo files (dng, cr3)
+        if [[ " $RAW_EXTS " =~ " $EXT_LOWER " ]]; then
+            mv "$FILE" "$RAW_PHOTOS/"
+            echo "Moved $BASENAME to RAW PHOTOS"    
+            continue
+        fi
+
+        # Move metadata files
+        if [[ " $METADATA_EXTS " =~ " $EXT_LOWER " ]]; then
+            mv "$FILE" "$DELETE/"
+            echo "Moved $BASENAME to DELETE/"
+            continue
+        fi
+
+        # Skip non-video files
+        if [[ ! " $IPHONE_VIDEO_EXTS " =~ " $EXT_LOWER " ]]; then
+            echo "Skipping $BASENAME: not a supported video file"
+            continue
+        fi
+
+
+        #move iphone videos
+        if [[ " $IPHONE_VIDEO_EXTS " =~ " $EXT_LOWER " ]]; then
+            #gets raw dimensions of file
+            RAW_DIMENSIONS=$(get_raw_dimensions "$FILE")
+            status=$?
+            #if function fails, or returns empty, skip the file
+            if [[ $status -ne 0 || -z "$RAW_DIMENSIONS" ]]; then
+                echo "Skipping $BASENAME (status=$status, dims='$RAW_DIMENSIONS')"
+                continue
+            fi
+
+            # Removes trailing 'x' if present (needed for parsing)
+            DIMENSIONS="${RAW_DIMENSIONS%x}"
+            WIDTH=${DIMENSIONS%x*}
+            HEIGHT=${DIMENSIONS#*x}
+
+            if ! [[ "$WIDTH" =~ ^[0-9]+$ && "$HEIGHT" =~ ^[0-9]+$ ]]; then
+                echo "Skipping $BASENAME: invalid dimensions ($RAW_DIMENSIONS)"
+                continue
+            fi
+
+            # check if live photo based on dimensions
+            if [[ "$WIDTH" == "1440" || "$HEIGHT" == "1440" ]]; then
+                mv "$FILE" "$LIVE_PHOTOS/"
+                echo "Moved $BASENAME to Live Photos/"
+                continue
+            fi
+            # ambiguous dimensions to be processed in 2nd pass
+            if [[ "$RAW_DIMENSIONS" == *x ]]; then
+                continue
+            fi
+            # Standard orientation detection
+            move_file_by_orientation "$WIDTH" "$HEIGHT"
+
+            continue
+        fi
+    done
+}
+
+#By this point, only files with "x" at the end of the dimensions remain
+#this usses FFMPEG to get rotation flag
+#if rotation flag is set, dimensions are swapped
+#it is kept separate and performed last as it is slower than every other operation
+swap_video_dimensions() {
+    for FILE in "$FOLDER_PATH"/*; do
+        [[ -f "$FILE" ]] || continue
+
+    #gets raw dimensions of file
+        RAW_DIMENSIONS=$(get_raw_dimensions "$FILE")
+        status=$?
+        #if function fails, or returns empty, skip the file
+        if [[ $status -ne 0 || -z "$RAW_DIMENSIONS" ]]; then
+            echo "Skipping $BASENAME (status=$status, dims='$RAW_DIMENSIONS')"
+            continue
+        fi
+
+        # Remove trailing 'x' if present (needed for parsing)
+        DIMENSIONS="${RAW_DIMENSIONS%x}"
+        WIDTH=${DIMENSIONS%x*}
+        HEIGHT=${DIMENSIONS#*x}
+
+        TEMP="0"
+        # Use Display Matrix rotation (if available)
+        echo "Getting rotation for $FILE"
+        ROTATION=$(get_rotation "$FILE")
+        echo "Rotation for $BASENAME: $ROTATION"
+        echo "[PRE SWAP] Height = $HEIGHT | Width = $WIDTH"
+        if [[ "$ROTATION" == "90" || "$ROTATION" == "-90" || "$ROTATION" == "270" || "$ROTATION" == "-270" ]]; then
+            TEMP=$HEIGHT
+            HEIGHT=$WIDTH
+            WIDTH=$TEMP
+            echo "[Post Swap] Height = $HEIGHT | Width = $WIDTH"
+        fi
+        # Standard orientation detection - TO DO make this a function
+        move_file_by_orientation "$WIDTH" "$HEIGHT"
+
+    done   
+}
+
 
 #################
 #EXECUTION BEGINS
@@ -197,6 +334,7 @@ DELETE="$FOLDER_PATH/DELETE"
 LIVE_PHOTOS="$FOLDER_PATH/Live Photos"
 EPHOTOS="$FOLDER_PATH/E Photos"
 VIDEOS="$FOLDER_PATH/VIDEOS"
+#TEST="$FOLDER_PATH/TEST"
 
 #define file extensions
     #MP4
@@ -214,158 +352,27 @@ METADATA_EXTS="srt aae lrf"
 
 # Create folders
 mkdir -p "$VIDEOS" "$HORIZONTAL" "$VERTICAL" "$PHOTOS" "$RAW_PHOTOS" "$DELETE" "$LIVE_PHOTOS" "$EPHOTOS"
+#mkdir -p "$TEST" #for testing purposes
 
-#Move IMG_E*** files to PHOTOS/Ephotos
-#move SRT, AAE, LRF to DELETE
-#move photos to /raw & /jpeg
+sort_media_files "$FOLDER_PATH" #1st pass - sorting files by type and dimensions
 
-for FILE in "$FOLDER_PATH"/*; do
-    [[ -f "$FILE" ]] || continue
+echo " " #adds newline in terminal for readability
 
-    #basename gives the file name + extension
-    BASENAME=$(basename "$FILE")
-    #extracts the extension from the file name
-    EXT="${FILE##*.}"
-    #makes the extension lowercase
-    EXT_LOWER=$(echo "$EXT" | tr '[:upper:]' '[:lower:]')
+swap_video_dimensions "$FOLDER_PATH" #2nd pass for files with ambiguous dimensions
 
-    # Move IMG_E*** files to E photos
-    if [[ "$BASENAME" == IMG_E* ]]; then
-        mv "$FILE" "$EPHOTOS/"
-        echo "Moved $BASENAME to E photos/"
-        continue
-    fi
+delete_empty_folders "$FOLDER_PATH" #cleanup
 
-    # Move photo files
-    if [[ " $PHOTO_EXTS " =~ " $EXT_LOWER " ]]; then
-        mv "$FILE" "$PHOTOS/"
-        echo "Moved $BASENAME to PHOTOS"
-        continue
-    fi
-
-    # Move camera/drone files
-    if [[ " $OTHER_VIDEO_EXTS " =~ " $EXT_LOWER " ]]; then
-        mv "$FILE" "$VIDEOS/"
-        echo "Moved $BASENAME to VIDEOS"
-        continue
-    fi
-
-    #move raw photo files
-    if [[ " $RAW_EXTS " =~ " $EXT_LOWER " ]]; then
-        mv "$FILE" "$RAW_PHOTOS/"
-        echo "Moved $BASENAME to RAW PHOTOS"    
-        continue
-    fi
-
-    # Move metadata files
-    if [[ " $METADATA_EXTS " =~ " $EXT_LOWER " ]]; then
-        mv "$FILE" "$DELETE/"
-        echo "Moved $BASENAME to DELETE/"
-        continue
-    fi
-
-    # Skip non-video files
-    if [[ ! " $IPHONE_VIDEO_EXTS " =~ " $EXT_LOWER " ]]; then
-        echo "Skipping $BASENAME: not a supported video file"
-        continue
-    fi
-
-
-    #move iphone videos
-    if [[ " $IPHONE_VIDEO_EXTS " =~ " $EXT_LOWER " ]]; then
-        #gets raw dimensions of file
-        RAW_DIMENSIONS=$(get_raw_dimensions "$FILE")
-        status=$?
-        #if function fails, or returns empty, skip the file
-        if [[ $status -ne 0 || -z "$RAW_DIMENSIONS" ]]; then
-            echo "Skipping $BASENAME (status=$status, dims='$RAW_DIMENSIONS')"
-            continue
-        fi
-
-        # Removes trailing 'x' if present (needed for parsing)
-        DIMENSIONS="${RAW_DIMENSIONS%x}"
-        WIDTH=${DIMENSIONS%x*}
-        HEIGHT=${DIMENSIONS#*x}
-
-        if ! [[ "$WIDTH" =~ ^[0-9]+$ && "$HEIGHT" =~ ^[0-9]+$ ]]; then
-            echo "Skipping $BASENAME: invalid dimensions ($RAW_DIMENSIONS)"
-            continue
-        fi
-
-        # check if live photo based on dimensions
-        if [[ "$WIDTH" == "1440" || "$HEIGHT" == "1440" ]]; then
-            mv "$FILE" "$LIVE_PHOTOS/"
-            echo "Moved $BASENAME to Live Photos/"
-            continue
-        fi
-        # ambiguous dimensions to be processed in 2nd pass
-        if [[ "$RAW_DIMENSIONS" == *x ]]; then
-            continue
-        fi
-        # Standard orientation detection
-        move_file_by_orientation "$WIDTH" "$HEIGHT"
-
-        continue
-    fi
-done
-echo " "
-
-
-
-#By this point, only files with "x" at the end of the dimensions remain
-#this usses FFMPEG to get rotation flag
-#if rotation flag is set, dimensions are swapped
-#it is kept separate and performed last as it is slower than every other operation
-for FILE in "$FOLDER_PATH"/*; do
-    [[ -f "$FILE" ]] || continue
-
-   #gets raw dimensions of file
-    RAW_DIMENSIONS=$(get_raw_dimensions "$FILE")
-    status=$?
-    #if function fails, or returns empty, skip the file
-    if [[ $status -ne 0 || -z "$RAW_DIMENSIONS" ]]; then
-        echo "Skipping $BASENAME (status=$status, dims='$RAW_DIMENSIONS')"
-        continue
-    fi
-
-    # Remove trailing 'x' if present (needed for parsing)
-    DIMENSIONS="${RAW_DIMENSIONS%x}"
-    WIDTH=${DIMENSIONS%x*}
-    HEIGHT=${DIMENSIONS#*x}
-
-    TEMP="0"
-    # Use Display Matrix rotation (if available)
-    ROTATION=$(get_rotation "$FILE")
-    echo "Rotation for $BASENAME: $ROTATION"
-    echo "[PRE SWAP] Height = $HEIGHT | Width = $WIDTH"
-    if [[ "$ROTATION" == "90" || "$ROTATION" == "-90" || "$ROTATION" == "270" || "$ROTATION" == "-270" ]]; then
-        TEMP=$HEIGHT
-        HEIGHT=$WIDTH
-        WIDTH=$TEMP
-        echo "[Post Swap] Height = $HEIGHT | Width = $WIDTH"
-    fi
-    # Standard orientation detection - TO DO make this a function
-    move_file_by_orientation "$WIDTH" "$HEIGHT"
-
-done   
-
-
-delete_empty_folders $FOLDER_PATH
-
-non_raw_photos_status=$(copy_non_raw_photos $RAW_PHOTOS)
-echo "$non_raw_photos_status"
-
-file_count_output=$(validate_file_count $FOLDER_PATH)
+file_count_output=$(validate_file_count "$FOLDER_PATH") #validation of file count
 echo "$file_count_output"
+
+non_raw_photos_status=$(copy_non_raw_photos "$RAW_PHOTOS") #copy non-raw photos for convenience
+echo "$non_raw_photos_status"
 
 
 
 
 
 #TO DO mute drone and camera videos
-
-#TO DO move this into a function - verify final media count
-
 
 #TO DO create report of what was changed, rather than printing everything in the terminal
 #TO DO create error log
