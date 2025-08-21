@@ -112,6 +112,7 @@ delete_empty_folders() {
             fi
         fi
     done
+    echo "✅ All empty folders deleted."
 }
 
 #check file names in photos/raw against photos/jpg. 
@@ -131,20 +132,17 @@ copy_non_raw_photos (){
         BASENAME=$(basename "$file")
         #check if file is a jpg
         image_ext="${file##*.}"
-        echo "$BASENAME has extension $image_ext"
 
         #ignores any non JPG files
         if [[ "$image_ext" == "JPG" ]]; then
             jpg_no_extension="${BASENAME%.*}"
-            echo "Checking if $jpg_no_extension is in raw files array"
             #check if the file name is in the raw_files array
             if [[ ! " ${raw_files_list[@]} " =~ " $jpg_no_extension " ]]; then
                 cp "$file" "$RAW_PHOTOS/"
-                echo "Copied $jpg_no_extension to $RAW_PHOTOS/"
             fi
         fi
     done
-    echo "Copied all non-raw photos!"
+    echo "✅ Copied all non-raw photos!"
 }
 
 #count total files again (check nothing was deleted)
@@ -153,9 +151,9 @@ validate_file_count() {
     second_count=$(find "$FOLDER_PATH" -type f | wc -l)
     echo "$count files found"  >&2 
     if (( second_count != count )); then
-        echo "file counts do not match"  >&2 
+        echo "❌ file counts do not match"  >&2 
     elif (( second_count == count )); then
-        echo "file count matches initial count"  >&2 
+        echo "✅ file count matches initial count"  >&2 
     fi
 }
 
@@ -177,35 +175,30 @@ sort_media_files() {
         # Move IMG_E*** files to E photos
         if [[ "$BASENAME" == IMG_E* ]]; then
             mv "$FILE" "$EPHOTOS/"
-            echo "Moved $BASENAME to E photos/"
             continue
         fi
 
         # Move photo files (jpg, heic, png)
         if [[ " $PHOTO_EXTS " =~ " $EXT_LOWER " ]]; then
             mv "$FILE" "$PHOTOS/"
-            echo "Moved $BASENAME to PHOTOS"
             continue
         fi
 
         # Move camera/drone files
         if [[ " $OTHER_VIDEO_EXTS " =~ " $EXT_LOWER " ]]; then
             mv "$FILE" "$VIDEOS/"
-            echo "Moved $BASENAME to VIDEOS"
             continue
         fi
 
         #move raw photo files (dng, cr3)
         if [[ " $RAW_EXTS " =~ " $EXT_LOWER " ]]; then
             mv "$FILE" "$RAW_PHOTOS/"
-            echo "Moved $BASENAME to RAW PHOTOS"    
             continue
         fi
 
         # Move metadata files
         if [[ " $METADATA_EXTS " =~ " $EXT_LOWER " ]]; then
             mv "$FILE" "$DELETE/"
-            echo "Moved $BASENAME to DELETE/"
             continue
         fi
 
@@ -240,7 +233,6 @@ sort_media_files() {
             # check if live photo based on dimensions
             if [[ "$WIDTH" == "1440" || "$HEIGHT" == "1440" ]]; then
                 mv "$FILE" "$LIVE_PHOTOS/"
-                echo "Moved $BASENAME to Live Photos/"
                 continue
             fi
             # ambiguous dimensions to be processed in 2nd pass
@@ -253,6 +245,7 @@ sort_media_files() {
             continue
         fi
     done
+    echo "✅ all media files sorted."
 }
 
 #By this point, only files with "x" at the end of the dimensions remain
@@ -281,18 +274,58 @@ swap_video_dimensions() {
         # Use Display Matrix rotation (if available)
         echo "Getting rotation for $FILE"
         ROTATION=$(get_rotation "$FILE")
-        echo "Rotation for $BASENAME: $ROTATION"
-        echo "[PRE SWAP] Height = $HEIGHT | Width = $WIDTH"
+        #echo "Rotation for $BASENAME: $ROTATION"
+        #echo "[PRE SWAP] Height = $HEIGHT | Width = $WIDTH"
         if [[ "$ROTATION" == "90" || "$ROTATION" == "-90" || "$ROTATION" == "270" || "$ROTATION" == "-270" ]]; then
             TEMP=$HEIGHT
             HEIGHT=$WIDTH
             WIDTH=$TEMP
-            echo "[Post Swap] Height = $HEIGHT | Width = $WIDTH"
+            #echo "[Post Swap] Height = $HEIGHT | Width = $WIDTH"
         fi
         # Standard orientation detection - TO DO make this a function
         move_file_by_orientation "$WIDTH" "$HEIGHT"
 
     done   
+    echo "✅ 2nd pass completed..."
+}
+
+mute_videos() {
+    echo "Muting videos..."
+    INPUT_DIR="$1"
+    mkdir -p "$INPUT_DIR/MUTED"
+    for file in "$INPUT_DIR"/*; do
+    filename=$(basename "$file")
+    extension="${filename##*.}"
+    name="${filename%.*}"
+    output="$INPUT_DIR/MUTED/${name}_muted.$extension"
+
+
+    if  [[ $name =~ ^MVI ]]; then
+        ffmpeg -v error -hide_banner -i "$file" -c copy -an "$output" -y
+    fi
+done
+
+echo "✅ All videos muted."
+
+}
+
+get_file_names() {
+    FOLDER="$1"
+    OUTPUT="$VIDEOS/file_names.txt"
+
+    # Make sure folder exists
+    if [[ ! -d "$FOLDER" ]]; then
+    echo "Error: Folder '$FOLDER' does not exist."
+    exit 1
+    fi
+
+    # Find video files and output filenames (with extensions) to the TXT file
+    find "$FOLDER" -type f \( -iname "*.mvi" -o -iname "*.mov" -o -iname "*.mp4" \) \
+        -exec basename {} \; > "$OUTPUT"
+
+    echo "✅ Video filenames saved to: $OUTPUT"
+
+
 }
 
 
@@ -356,23 +389,19 @@ mkdir -p "$VIDEOS" "$HORIZONTAL" "$VERTICAL" "$PHOTOS" "$RAW_PHOTOS" "$DELETE" "
 
 sort_media_files "$FOLDER_PATH" #1st pass - sorting files by type and dimensions
 
-echo " " #adds newline in terminal for readability
-
-swap_video_dimensions "$FOLDER_PATH" #2nd pass for files with ambiguous dimensions
-
-delete_empty_folders "$FOLDER_PATH" #cleanup
-
 file_count_output=$(validate_file_count "$FOLDER_PATH") #validation of file count
 echo "$file_count_output"
 
 non_raw_photos_status=$(copy_non_raw_photos "$RAW_PHOTOS") #copy non-raw photos for convenience
 echo "$non_raw_photos_status"
 
+mute_videos "$VIDEOS"
 
+get_file_names "$VIDEOS"
 
+swap_video_dimensions "$FOLDER_PATH" #2nd pass for files with ambiguous dimensions
 
-
-#TO DO mute drone and camera videos
+delete_empty_folders "$FOLDER_PATH" #cleanup
 
 #TO DO create report of what was changed, rather than printing everything in the terminal
 #TO DO create error log
